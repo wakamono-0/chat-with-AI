@@ -1,57 +1,49 @@
 import streamlit as st
 import google.generativeai as genai
+from groq import Groq  # Groqを追加
 import time
 
-# ページ設定
-st.set_page_config(page_title="高機能AIアシスタント", page_icon="🤖")
+st.set_page_config(page_title="マルチAIアシスタント", page_icon="🤖")
 
 # ==========================================
-# 1. サイドバー（設定メニュー）の作成
+# 1. サイドバー（設定メニュー）
 # ==========================================
 with st.sidebar:
     st.title("⚙️ 設定")
     
-    # プルダウンメニューでモデルを選択
+    # 3つのモデルから選べるように変更
     selected_model_label = st.selectbox(
         "AIモデルを選択",
-        ["Gemini 2.5 Flash (高速・軽量)", "Gemini 2.5 Pro (高性能・複雑な推論)"]
+        [
+            "Gemini 2.5 Flash (Google/高速)", 
+            "Gemini 2.5 Pro (Google/高性能)",
+            "Llama 3 8B (Groq/爆速)"  # 追加！
+        ]
     )
     
-    # 選んだメニューに合わせて、実際のモデル名を決定
-    if selected_model_label == "Gemini 2.5 Flash (高速・軽量)":
-        target_model_name = "gemini-2.5-flash"
-    else:
-        target_model_name = "gemini-2.5-pro"
-        
-    st.divider() # 区切り線
-    
-    # 会話履歴をリセットするボタン
+    st.divider()
     if st.button("💬 会話履歴をリセット"):
         st.session_state.messages = []
-        st.rerun() # 画面を再読み込みしてまっさらにする
+        st.rerun()
 
 # ==========================================
-# 2. メイン画面とAIの設定
+# 2. APIの初期設定
 # ==========================================
-st.title("高機能AIアシスタント")
+st.title("マルチAIアシスタント")
 
 try:
-    GOOGLE_API_KEY = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=GOOGLE_API_KEY)
+    # Geminiの設定
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    # Groqの設定
+    groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
     
-    system_instruction = "あなたは非常に優秀でフレンドリーなエンジニアです。回答は簡潔かつ専門的に行ってください。"
-    
-    # サイドバーで決定した target_model_name をセットする
-    model = genai.GenerativeModel(
-        model_name=target_model_name,
-        system_instruction=system_instruction
-    )
+    system_instruction = "あなたは非常に優秀でフレンドリーなエンジニアです。簡潔に答えてください。"
 except Exception as e:
-    st.error(f"設定エラー: {e}")
+    st.error("APIキーの設定エラーです。secrets.tomlを確認してください。")
     st.stop()
 
 # ==========================================
-# 3. 記憶の管理
+# 3. 記憶の管理と表示
 # ==========================================
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -61,7 +53,7 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
 
 # ==========================================
-# 4. チャット処理
+# 4. チャット処理（モデル切り替え）
 # ==========================================
 if prompt := st.chat_input("何でも相談してください"):
     with st.chat_message("user"):
@@ -69,26 +61,47 @@ if prompt := st.chat_input("何でも相談してください"):
     st.session_state.messages.append({"role": "user", "content": prompt})
 
     with st.chat_message("assistant"):
-        history = [
-            {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
-            for m in st.session_state.messages[:-1]
-        ]
-        
-        chat = model.start_chat(history=history)
         response_placeholder = st.empty()
         full_response = ""
         
         try:
-            # プロンプト送信（ストリーミング）
-            responses = chat.send_message(prompt, stream=True)
+            # --- Geminiが選ばれた場合の処理 ---
+            if "Gemini" in selected_model_label:
+                target_model = "gemini-1.5-flash" if "Flash" in selected_model_label else "gemini-1.5-pro"
+                model = genai.GenerativeModel(model_name=target_model, system_instruction=system_instruction)
+                
+                # Gemini用の履歴データ作成
+                history = [{"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]} for m in st.session_state.messages[:-1]]
+                chat = model.start_chat(history=history)
+                
+                responses = chat.send_message(prompt, stream=True)
+                for chunk in responses:
+                    if chunk.text:
+                        for char in chunk.text:
+                            full_response += char
+                            time.sleep(0.01) # 少し速めに設定
+                            response_placeholder.markdown(full_response + "▌")
             
-            for chunk in responses:
-                if chunk.text:
-                    for char in chunk.text:
-                        full_response += char
-                        time.sleep(0.02) 
+            # --- Groq (Llama 3)が選ばれた場合の処理 ---
+            else:
+                # Groq用の履歴データ作成（OpenAIと同じ形式）
+                messages = [{"role": "system", "content": system_instruction}]
+                for m in st.session_state.messages:
+                    messages.append({"role": m["role"], "content": m["content"]})
+                
+                # 爆速APIを呼び出す
+                stream = groq_client.chat.completions.create(
+                    model="llama3-8b-8192",
+                    messages=messages,
+                    stream=True,
+                )
+                for chunk in stream:
+                    if chunk.choices[0].delta.content is not None:
+                        full_response += chunk.choices[0].delta.content
+                        time.sleep(0.01)
                         response_placeholder.markdown(full_response + "▌")
-            
+
+            # 最終的な確定表示と保存
             response_placeholder.markdown(full_response)
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
